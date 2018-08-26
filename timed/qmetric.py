@@ -1,9 +1,11 @@
 # Program to calculate the Q-metric and error for an example simulation of closure phases from a GRMHD movie and static source. The data set is divided in multiple segments and Q is calculated using equations 21 and 26-28 of Roelofs et al. (2017). The outcome with the example data set is Figure 6 of Roelofs et al. (2017).
 # Maciek Wielgus, 2017/11/28, maciek.wielgus@gmail.com
+# Dom Pesce, 2018/08/02, dom.pesce@gmail.com
 # based on Freek Roelofs et al., ApJ 847, Quantifying Intrinsic Variability of Sagittarius A* Using Closure Phase Measurements of the Event Horizon Telescope
 import numpy as np
+import matplotlib.pyplot as plt
 
-def qmetric(datfile, bintime=0, segtime=0, diftime=0, product='cphase',detrend_deg=-1,diff_accuracy = 0.1):
+def qmetric(time, obs, obs_err, bintime=0, segtime=0, diftime=0, product='cphase',detrend_deg=-1,diff_accuracy = 0.1,sigma_cut=500,loess=False):
     """Main function to calculate q-metric and error
     bintime - binning period for unevenly sampled data
     defaultly calculated as median difference between observations
@@ -14,12 +16,10 @@ def qmetric(datfile, bintime=0, segtime=0, diftime=0, product='cphase',detrend_d
     -1 = no detrending, 0 = constant, 1 = linear, ...
     diff_accuracy = 
     """
-    #Load data   
-    data=np.loadtxt(datfile)    
-    time=data[:,0] #units? #HOURS
-    obs=data[:,1] #time series (e.g. closure phase)
-    obs_err=data[:,2] #obs measurement error
 
+    time=time[obs_err<sigma_cut]
+    obs=obs[obs_err<sigma_cut]
+    obs_err=obs_err[obs_err<sigma_cut]
     #CHECK IF DATA IS SAMPLED UNIFORMLY
     #IF IT IS, binning==False
     median_diff = np.median(np.diff(time))
@@ -28,7 +28,7 @@ def qmetric(datfile, bintime=0, segtime=0, diftime=0, product='cphase',detrend_d
     binning = not all((np.diff(time) - np.mean(np.diff(time)))==0)
     #IF UNUNIFORMLY SAMPLED DATA DO THE BINNING
     if binning==True:
-        print('Non-uniform sampling detected, binning the data with bintime = %s' %str(bintime))
+        #print('Non-uniform sampling detected, binning the data with bintime = %s' %str(bintime))
         bins = np.arange(min(time)-bintime/2., max(time)+bintime+1., bintime)
         digitized = np.digitize(time, bins, right=False) # Assigns a bin number to each of the closure phases
         bin_times = []
@@ -55,7 +55,10 @@ def qmetric(datfile, bintime=0, segtime=0, diftime=0, product='cphase',detrend_d
     #SEGMENTATION OF DATA
     if segtime==0:
         if detrend_deg>-1:
-            obs = detrending_polyfit(time,obs,detrend_deg)
+            if loess==True:
+                obs = loess(time,obs,obs_err,time,width=10.0,order=detrend_deg)
+            else:
+                obs = detrending_polyfit(time,obs,obs_err,detrend_deg)
         q, dq, n = find_q_basic(obs,obs_err)
     else:
         print('Segmenting data with segtime = %s' %str(segtime))
@@ -72,7 +75,7 @@ def qmetric(datfile, bintime=0, segtime=0, diftime=0, product='cphase',detrend_d
             if len(time_local)>N: #let's have at least N datapoints in each segment
                 time_segments.append(time_local)
                 if detrend_deg>-1:
-                    obs_local = detrending_polyfit(time_local,obs_local,detrend_deg)
+                    obs_local = detrending_polyfit(time_local,obs_local,obs_err_local,detrend_deg)
                 obs_segments.append(obs_local)
                 obs_err_segments.append(obs_err_local)
         #Calculate q metric in each segment
@@ -174,12 +177,21 @@ def R_from_st(st):
     R = np.exp(-(st*np.pi/180.)**2/2.)
     return R
 
-def detrending_polyfit(time,obs,deg=1):
+def detrending_polyfit(time,obs,errs=None,deg=1,weights=True):
     #just subtract linear fit inside segment
     time = np.asarray(time)
+    t0 = time[0]
+    time = time-t0
     obs = np.asarray(obs)
-    fit = np.polyfit(time, obs, deg)
+    obs = obs*np.pi/180
+    obs = np.unwrap(obs)
+    we = 0*obs+1.#just ones
+    if weights==True:
+        we= 1/errs
+
+    fit = np.polyfit(time, obs, deg,w=we)
     obs = obs - np.polyval(fit,time)
+    obs = (( obs + np.pi) % (2 * np.pi ) - np.pi)*180./np.pi
     return obs
 
 def diff_time(time,obs,err, dt, accuracy = 0.1):
@@ -192,7 +204,7 @@ def diff_time(time,obs,err, dt, accuracy = 0.1):
         ind = np.argmin(delta)
         if delta[ind]<accuracy*dt:
             time_new.append(time[cou])
-            obs_new.append(obs[ind] - obs[cou])
+            obs_new.append(180/np.pi*np.angle(np.exp(1j*np.pi/180.*(obs[ind]-obs[cou]))))
             err_new.append( np.sqrt(err[ind]**2+err[cou]**2) )
     return np.asarray(time_new),np.asarray(obs_new),np.asarray(err_new)
 
@@ -269,33 +281,6 @@ def add_noise_file(datfile, noise_sd=1., errfile='', savefile = '',copy_sigmas=F
 #FUNCTIONS FOR CALCULATING STATISTICS
 #####---------------------------------
 
-def circ_mean_weights(angles, err='ones'):
-    """Calculate circular average for list of angles + errors"""
-    if str(err)=='ones':
-        err = np.ones(len(angles))
-    cos=np.zeros(len(angles))
-    sin=np.zeros(len(angles))
-    weights=np.zeros(len(angles))
-    for i in range(len(angles)):
-        cos[i]=np.cos(angles[i]*deg2rad)
-        sin[i]=np.sin(angles[i]*deg2rad)
-        err[i] *= deg2rad
-        weights[i] = 1./err[i]**2
-    cos_avg=np.average(cos, weights=weights)
-    sin_avg=np.average(sin, weights=weights)
-    obs_mean=np.arctan2(sin_avg, cos_avg)*rad2deg
-    if len(angles) == 1:
-        obs_stdev = err[0] * rad2deg
-    else:
-        #obs_variance=1-np.sqrt(sin_avg**2+cos_avg**2)
-        #obs_stdev=np.sqrt(-2*np.log((1-obs_variance))/len(angles))*rad2deg
-        s=0
-        for i in range(len(err)):
-            s += err[i]**2
-        obs_stdev=np.sqrt(s)/len(err) * rad2deg
-    
-    return obs_mean, obs_stdev
-
 def circular_mean_weights(theta,err='ones'):
     #i/o in degrees
     theta = np.asarray(theta)*np.pi/180. #to radians
@@ -355,3 +340,194 @@ def circular_std_of_mean_dif(theta):
     S = np.mean(np.sin(dif_theta))
     st = np.sqrt(-2.*np.log(np.sqrt(C**2+S**2)))*180./np.pi/np.sqrt(len(theta))/np.sqrt(2.)
     return st
+
+
+def diagnostic_plots(filepath, detrend_deg=-1,diff_show=0.01,errscale=1.,sigma_cut=500,segtime=0):
+    import matplotlib.pyplot as plt
+    data = np.loadtxt(filepath)
+    time= data[:,0]
+    cphase=data[:,1]
+    sigmacp = data[:,2]
+    time=time[sigmacp<sigma_cut]
+    cphase=cphase[sigmacp<sigma_cut]
+    sigmacp=sigmacp[sigmacp<sigma_cut]
+    fig,ax = plt.subplots(2,2)
+    fig.set_figheight(12)
+    fig.set_figwidth(12)
+    ####UP LEFT PANEL
+    ax[0,0].errorbar(time,cphase,errscale*sigmacp,color='blue',label='raw',fmt='o')
+    if detrend_deg>-1:
+        cpdtr = detrending_polyfit(time,cphase,sigmacp,detrend_deg)
+        ax[0,0].errorbar(time,cpdtr,errscale*sigmacp,color='r',label='detrended, deg= '+str(detrend_deg),fmt='o')
+    ax[0,0].grid()
+    ax[0,0].set_xlabel('time')
+    
+    ax[0,0].legend()
+    #plt.show()
+
+    ####UP RIGHT PANEL
+    ax[0,1].errorbar(time,cphase,errscale*sigmacp,color='blue',label='raw',fmt='o')
+    time2,obs2, obs_err2 = diff_time(time,cphase,sigmacp, diff_show)
+
+    ax[0,1].errorbar(time2,obs2,errscale*obs_err2,color='r',label='differentiated, dt= '+str(diff_show),fmt='o')
+    ax[0,1].set_xlabel('time')
+    ax[0,1].grid()
+    ax[0,1].legend()
+    
+
+    ####BOTTOM LEFT PANEL
+    variab = [-1,0,1,2,3,4,5,6,7]
+    err= np.zeros(len(variab))
+    qm= np.zeros(len(variab))
+    for cou in range(len(variab)):
+        #segtime=segsp[cou]
+        foo = qmetric(time,cphase,sigmacp,detrend_deg=variab[cou],segtime=segtime)
+        qm[cou]=foo[0]
+        err[cou]=foo[1]
+    #qm[cou],foo = qf.qmetric(filep,diftime=variab[cou])
+    ax[1,0].errorbar(variab,qm,err)
+    ax[1,0].set_xlabel('poly degree')
+    ax[1,0].set_ylabel('Q')
+    #plt.show()
+
+
+   ####BOTTOM RIGHT PANEL
+    variab = np.linspace(0.5*diff_show,2.*diff_show,12)
+    err= np.zeros(len(variab))
+    qm= np.zeros(len(variab))
+    for cou in range(len(variab)):
+        #segtime=segsp[cou]
+        foo = qmetric(time,cphase,sigmacp,diftime=variab[cou],segtime=segtime)
+        qm[cou]=foo[0]
+        err[cou]=foo[1]
+    #qm[cou],foo = qf.qmetric(filep,diftime=variab[cou])
+    ax[1,1].errorbar(variab,qm,err)
+    ax[1,1].set_xlabel('difftime')
+    #ax[1,1].ticks_params(axis='x',rotation='vertical')
+    #ax[1,1].set_ylabel('Q')
+    plt.show()
+
+def loess(t,X,X_err,t_new,width=10.0,order=1):
+    """Determine the loess regression for a time series.
+    
+    Args:
+    t (Array): the input time array
+    X (Array): the input data array
+    X_err (Array): the input data uncertainties
+    t_new (Array): the time array over which to perform the loess regression; assumed to have the same units as t
+    width (float): the window over which to perform the regression; assumed to have the same units as t
+    order (int): the order of the polynomial to be fit across the window at each t_new value
+    
+    Returns:
+    X_new: a data array sampled according to t_new
+    
+    """
+    
+    X_new = np.zeros_like(t_new)
+    
+    for i in range(len(t_new)):
+        
+        center = t_new[i]
+        
+        if ((t_new[i] - (width/2.0)) < t[0]):
+            start = t[0]
+            finish = center + (width / 2.0)
+            
+        if (((t_new[i] - (width/2.0)) >= t[0]) & ((t_new[i] + (width/2.0)) <= t[-1])):
+            start = center - (width / 2.0)
+            finish = start + width
+            
+        if ((t_new[i] + (width/2.0)) > t[-1]):
+            start = center - (width / 2.0)
+            finish = t[-1]
+            
+        mask = ((t >= start) & (t <= finish))
+        
+        t_here = t[mask]
+        X_here = X[mask]
+        
+        weight = (1.0 - ((np.abs(t_here - center)/(width/2.0))**3.0))**3.0
+        weight *= 1.0/X_err[mask]
+    
+        coeffs = np.polyfit(t_here,X_here,deg=order,w=weight)
+        
+        for j in range(len(coeffs)):
+            X_new[i] += coeffs[len(coeffs)-j-1]*(center**float(j))
+            
+    return X_new
+        
+def loess_circular(t,P,P_err,t_new,width=10.0,order=1,account_for_error=True):
+    """Determine the loess regression for a time series of phases.
+        
+        Args:
+       t (Array): the input time array
+       P (Array): the input phase array, in degrees
+       P_err (Array): the input phase uncertainties, in degrees
+       t_new (Array): the time array over which to perform the loess regression; assumed to have the same units as t
+       width (float): the window over which to perform the regression; assumed to have the same units as t
+       order (int): the order of the polynomial to be fit across the window at each t_new value
+       account_for_error (Bool): set to True to weight by the measurement error when averaging; assumes Gaussian uncertainties
+        
+        Returns:
+       X_new: a phase array sampled according to t_new
+        
+    """
+    
+    X = P*(np.pi/180.0)
+    X_err = P_err*(np.pi/180.0)
+    
+    C = np.cos(X)
+    S = np.sin(X)
+    C_err = np.abs(X_err*S)
+    S_err = np.abs(X_err*C)
+    
+    C_new = np.zeros_like(t_new)
+    S_new = np.zeros_like(t_new)
+    
+    for i in range(len(t_new)):
+        center = t_new[i]
+        
+        if ((t_new[i] - (width/2.0)) < t[0]):
+            start = t[0]
+            finish = center + (width / 2.0)
+            
+        if (((t_new[i] - (width/2.0)) >= t[0]) & ((t_new[i] + (width/2.0)) <= t[-1])):
+            start = center - (width / 2.0)
+            finish = start + width
+            
+        if ((t_new[i] + (width/2.0)) > t[-1]):
+            start = center - (width / 2.0)
+            finish = t[-1]
+        
+        mask = ((t >= start) & (t <= finish))
+        
+        t_here = t[mask]
+        X_here = X[mask]
+        C_here = C[mask]
+        S_here = S[mask]
+        
+        weight = (1.0 - ((np.abs(t_here - center)/(width/2.0))**3.0))**3.0
+        if account_for_error == True:
+            C_weight = weight/C_err[mask]
+            S_weight = weight/S_err[mask]
+        else:
+            C_weight = np.copy(weight)
+            S_weight = np.copy(weight)
+                
+        C_coeffs = np.polyfit(t_here,C_here,deg=order,w=C_weight)
+        for j in range(len(C_coeffs)):
+            C_new[i] += C_coeffs[len(C_coeffs)-j-1]*(center**float(j))
+            
+            S_coeffs = np.polyfit(t_here,S_here,deg=order,w=S_weight)
+        for j in range(len(S_coeffs)):
+            S_new[i] += S_coeffs[len(S_coeffs)-j-1]*(center**float(j))
+        
+    X_new = np.arctan2(S_new,C_new)
+    X_new *= (180.0/np.pi)
+    
+    # Re-wrapping the phases
+    X_new = ((X_new + 180.0 ) % 360.0) - 180.0
+    X_new[X_new > 180.0] -= 360.0
+    X_new[X_new < -180.0] += 360.0
+    
+    return X_new
